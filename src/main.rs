@@ -14,6 +14,7 @@ use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instr
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use config::Config;
 use crate::clipboard::Clipboard;
 
 mod clipboard;
@@ -66,7 +67,30 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     match args.clipboard {
         Some(port) => start_client(clipboard, port).await,
-        None => start_server(clipboard).await,
+        None => {
+            if args.listen {
+                // Server mode — fixed port from config or --port
+                let config = load_or_create_config();
+                let port = args.port.unwrap_or(config.server_port);
+                start_server_fixed(clipboard, port).await
+            } else if let Some(ref addr_str) = args.connect {
+                // Client mode — explicit address via --connect
+                let (ip, port_str) = addr_str.split_once(':')
+                    .unwrap_or_else(|| {
+                        eprintln!("Invalid --connect format. Use IP:PORT (e.g. 192.168.0.200:12345)");
+                        exit(1);
+                    });
+                let port: u16 = port_str.parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid port in --connect: {port_str}");
+                    exit(1);
+                });
+                start_client_direct(clipboard, ip, port).await
+            } else {
+                // Default: client mode — read config
+                let config = load_or_create_config();
+                start_client_direct(clipboard, &config.server_ip, config.server_port).await
+            }
+        }
     }
 }
 
@@ -294,6 +318,28 @@ async fn recv_clipboard(
             .in_current_span()
             .await?;
         clipboard.copy(obj).in_current_span().await?;
+    }
+}
+
+fn load_or_create_config() -> Config {
+    match Config::load() {
+        Ok(config) => config,
+        Err(config::ConfigError::FileNotFound(_)) => {
+            match Config::create_default() {
+                Ok(config) => {
+                    eprintln!("Created default config at ~/.clipshare.toml");
+                    config
+                }
+                Err(e) => {
+                    eprintln!("Failed to create default config: {e}");
+                    exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to load config: {e}");
+            exit(1);
+        }
     }
 }
 
