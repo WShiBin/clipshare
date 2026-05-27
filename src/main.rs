@@ -323,6 +323,8 @@ async fn recv_clipboard(
             .in_current_span()
             .await?;
         clipboard.copy(obj).in_current_span().await?;
+        // Play terminal bell when clipboard is synced from remote
+        eprint!("\x07");
     }
 }
 
