@@ -17,6 +17,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use crate::clipboard::Clipboard;
 
 mod clipboard;
+mod config;
 
 const HANDSHAKE: &[u8; 9] = b"clipshare";
 
