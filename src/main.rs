@@ -131,6 +131,51 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
 }
 
 #[instrument(skip(clipboard))]
+async fn start_server_fixed(
+    clipboard: Arc<Clipboard>,
+    port: u16,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let cert = rcgen::generate_simple_self_signed([])?;
+    let public_key = cert.serialize_der()?;
+    let private_key = cert.serialize_private_key_der();
+
+    let tls_acceptor = {
+        let config = rustls::ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(vec![Certificate(public_key)], PrivateKey(private_key))?;
+        TlsAcceptor::from(Arc::new(config))
+    };
+
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    eprintln!("Clipshare server listening on port {port}");
+
+    while let Ok((stream, addr)) = listener.accept().await {
+        let stream = tls_acceptor.accept(stream).await?;
+        trace!("New connection arrived");
+        let ip = addr.ip();
+        let clipboard = clipboard.clone();
+        tokio::spawn(
+            async move {
+                let (reader, writer) = tokio::io::split(stream);
+
+                if let Err(err) = select! {
+                    result = recv_clipboard(clipboard.clone(), reader) => result,
+                    result = send_clipboard(clipboard.clone(), writer) => result,
+                } {
+                    debug!(error = %err, "Server error");
+                }
+                trace!("Finishing server connection");
+                Ok::<_, Box<dyn Error + Send + Sync>>(())
+            }
+            .instrument(error_span!("Connection", %ip)),
+        );
+    }
+
+    Ok(())
+}
+
+#[instrument(skip(clipboard))]
 async fn start_client(
     clipboard: Arc<Clipboard>,
     clipboard_port: u16,
@@ -179,6 +224,47 @@ async fn start_client(
         eprintln!("Clipboard {clipboard_port} not found");
         exit(1);
     }
+}
+
+#[instrument(skip(clipboard))]
+async fn start_client_direct(
+    clipboard: Arc<Clipboard>,
+    server_ip: &str,
+    server_port: u16,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("Connecting to clipboard at {server_ip}:{server_port}...");
+
+    let tls_connector = {
+        let config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(NoCa))
+            .with_no_client_auth();
+        TlsConnector::from(Arc::new(config))
+    };
+
+    let addr = format!("{server_ip}:{server_port}");
+    let stream = TcpStream::connect(&addr).await
+        .map_err(|e| format!("Failed to connect to {addr}: {e}"))?;
+    let ip = stream.peer_addr()?.ip();
+    let stream = tls_connector
+        .connect(ServerName::IpAddress(ip), stream)
+        .await?;
+
+    let (reader, writer) = tokio::io::split(stream);
+    let span = error_span!("Connection", %ip).entered();
+    eprintln!("Clipboards connected");
+
+    if let Err(err) = select! {
+        result = recv_clipboard(clipboard.clone(), reader).in_current_span() => result,
+        result = send_clipboard(clipboard.clone(), writer).in_current_span() => result,
+    } {
+        debug!(error = %err, "Client error");
+    }
+
+    trace!("Finish client connection");
+    span.exit();
+    eprintln!("Clipboard closed");
+    Ok(())
 }
 
 #[instrument(skip(clipboard, stream))]
