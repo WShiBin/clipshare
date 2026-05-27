@@ -74,7 +74,7 @@ impl Config {
 
 fn config_path() -> Result<PathBuf, ConfigError> {
     dirs::home_dir()
-        .map(|h| h.join(".clipshare.toml"))
+        .map(|h| h.join(".config").join("clipshare.toml"))
         .ok_or(ConfigError::NoHomeDir)
 }
 

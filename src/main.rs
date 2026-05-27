@@ -35,7 +35,7 @@ const HANDSHAKE: &[u8; 9] = b"clipshare";
         clipshare --listen           Server mode, wait for connections\n  \
         clipshare --connect 192.168.0.200:12345  Client, connect to explicit address\n  \
         clipshare 11337              Legacy UDP discovery mode\n\n\
-    Configuration file: ~/.clipshare.toml (auto-created)"
+    Configuration file: ~/.config/clipshare.toml (auto-created)"
 )]
 struct Cli {
     /// Clipboard id to connect to (UDP discovery mode, legacy)
@@ -333,7 +333,7 @@ fn load_or_create_config() -> Config {
         Ok(config) => config,
         Err(config::ConfigError::FileNotFound(_)) => match Config::create_default() {
             Ok(config) => {
-                eprintln!("Created default config at ~/.clipshare.toml");
+                eprintln!("Created default config at ~/.config/clipshare.toml");
                 config
             }
             Err(e) => {
