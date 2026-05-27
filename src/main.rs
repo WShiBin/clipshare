@@ -2,7 +2,9 @@ use std::{error::Error, io, net::SocketAddr, process::exit, sync::Arc, time::Dur
 
 use clap::Parser;
 use clipboard::ClipboardObject;
-use rustls::{client::ServerCertVerifier, Certificate, PrivateKey, ServerName};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -98,9 +100,9 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
     socket.set_broadcast(true)?;
     let port = socket.local_addr()?.port();
 
-    let cert = rcgen::generate_simple_self_signed([])?;
-    let public_key = cert.serialize_der()?;
-    let private_key = cert.serialize_private_key_der();
+    let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([])?;
+    let public_key = cert.der().to_vec();
+    let private_key = signing_key.serialize_der();
 
     tokio::spawn(
         async move {
@@ -118,9 +120,11 @@ async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + S
 
     let tls_acceptor = {
         let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![Certificate(public_key)], PrivateKey(private_key))?;
+            .with_single_cert(
+                vec![CertificateDer::from(public_key)],
+                PrivateKeyDer::Pkcs8(private_key.into()),
+            )?;
         TlsAcceptor::from(Arc::new(config))
     };
 
@@ -157,15 +161,17 @@ async fn start_server_fixed(
     clipboard: Arc<Clipboard>,
     port: u16,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cert = rcgen::generate_simple_self_signed([])?;
-    let public_key = cert.serialize_der()?;
-    let private_key = cert.serialize_private_key_der();
+    let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([])?;
+    let public_key = cert.der().to_vec();
+    let private_key = signing_key.serialize_der();
 
     let tls_acceptor = {
         let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
-            .with_single_cert(vec![Certificate(public_key)], PrivateKey(private_key))?;
+            .with_single_cert(
+                vec![CertificateDer::from(public_key)],
+                PrivateKeyDer::Pkcs8(private_key.into()),
+            )?;
         TlsAcceptor::from(Arc::new(config))
     };
 
@@ -221,7 +227,7 @@ async fn start_client(
     if &buf == HANDSHAKE {
         let tls_connector = {
             let config = rustls::ClientConfig::builder()
-                .with_safe_defaults()
+                .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoCa))
                 .with_no_client_auth();
             TlsConnector::from(Arc::new(config))
@@ -231,7 +237,7 @@ async fn start_client(
         let stream = TcpStream::connect(addr).await?;
         let ip = stream.peer_addr()?.ip();
         let stream = tls_connector
-            .connect(ServerName::IpAddress(ip), stream)
+            .connect(ServerName::IpAddress(ip.into()), stream)
             .await?;
 
         let (reader, writer) = tokio::io::split(stream);
@@ -265,7 +271,7 @@ async fn start_client_direct(
 
     let tls_connector = {
         let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCa))
             .with_no_client_auth();
         TlsConnector::from(Arc::new(config))
@@ -278,7 +284,7 @@ async fn start_client_direct(
         .map_err(|e| format!("Failed to connect to {addr}: {e}"))?;
     let ip = stream.peer_addr()?.ip();
     let stream = tls_connector
-        .connect(ServerName::IpAddress(ip), stream)
+        .connect(ServerName::IpAddress(ip.into()), stream)
         .await?;
 
     let (reader, writer) = tokio::io::split(stream);
@@ -348,18 +354,50 @@ fn load_or_create_config() -> Config {
     }
 }
 
+#[derive(Debug)]
 struct NoCa;
 
 impl ServerCertVerifier for NoCa {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+        ]
     }
 }
