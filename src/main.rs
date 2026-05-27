@@ -1,4 +1,4 @@
-use std::{error::Error, io, process::exit, sync::Arc, time::Duration};
+use std::{error::Error, io, net::SocketAddr, process::exit, sync::Arc, time::Duration};
 
 use clap::Parser;
 use clipboard::ClipboardObject;
@@ -33,7 +33,7 @@ struct Cli {
     listen: bool,
 
     /// Connect to a specific address (format: IP:PORT)
-    #[arg(long)]
+    #[arg(long, value_name = "IP:PORT")]
     connect: Option<String>,
 
     /// Server port (only used with --listen)
@@ -75,15 +75,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 start_server_fixed(clipboard, port).await
             } else if let Some(ref addr_str) = args.connect {
                 // Client mode — explicit address via --connect
-                let (ip, port_str) = addr_str.split_once(':').unwrap_or_else(|| {
-                    eprintln!("Invalid --connect format. Use IP:PORT (e.g. 192.168.0.200:12345)");
+                let addr: SocketAddr = addr_str.parse().unwrap_or_else(|_| {
+                    eprintln!(
+                        "Invalid --connect format. Use IP:PORT (e.g. 192.168.0.200:12345) \
+                         or [IPv6]:PORT (e.g. [::1]:12345)"
+                    );
                     exit(1);
                 });
-                let port: u16 = port_str.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid port in --connect: {port_str}");
-                    exit(1);
-                });
-                start_client_direct(clipboard, ip, port).await
+                start_client_direct(clipboard, &addr.ip().to_string(), addr.port()).await
             } else {
                 // Default: client mode — read config
                 let config = load_or_create_config();
@@ -174,7 +173,13 @@ async fn start_server_fixed(
     eprintln!("Clipshare server listening on port {port}");
 
     while let Ok((stream, addr)) = listener.accept().await {
-        let stream = tls_acceptor.accept(stream).await?;
+        let stream = match tls_acceptor.accept(stream).await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(error = %e, "TLS accept failed");
+                continue;
+            }
+        };
         trace!("New connection arrived");
         let ip = addr.ip();
         let clipboard = clipboard.clone();
@@ -267,8 +272,9 @@ async fn start_client_direct(
     };
 
     let addr = format!("{server_ip}:{server_port}");
-    let stream = TcpStream::connect(&addr)
+    let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
         .await
+        .map_err(|_| format!("Connection to {addr} timed out after 5s"))?
         .map_err(|e| format!("Failed to connect to {addr}: {e}"))?;
     let ip = stream.peer_addr()?.ip();
     let stream = tls_connector
