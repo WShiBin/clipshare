@@ -1,6 +1,6 @@
 use std::{error::Error, io, process::exit, sync::Arc, time::Duration};
 
-use clap::{command, Parser};
+use clap::Parser;
 use clipboard::ClipboardObject;
 use rustls::{client::ServerCertVerifier, Certificate, PrivateKey, ServerName};
 use tokio::{
@@ -14,8 +14,8 @@ use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instr
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use config::Config;
 use crate::clipboard::Clipboard;
+use config::Config;
 
 mod clipboard;
 mod config;
@@ -75,11 +75,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 start_server_fixed(clipboard, port).await
             } else if let Some(ref addr_str) = args.connect {
                 // Client mode — explicit address via --connect
-                let (ip, port_str) = addr_str.split_once(':')
-                    .unwrap_or_else(|| {
-                        eprintln!("Invalid --connect format. Use IP:PORT (e.g. 192.168.0.200:12345)");
-                        exit(1);
-                    });
+                let (ip, port_str) = addr_str.split_once(':').unwrap_or_else(|| {
+                    eprintln!("Invalid --connect format. Use IP:PORT (e.g. 192.168.0.200:12345)");
+                    exit(1);
+                });
                 let port: u16 = port_str.parse().unwrap_or_else(|_| {
                     eprintln!("Invalid port in --connect: {port_str}");
                     exit(1);
@@ -208,7 +207,8 @@ async fn start_client(
     eprintln!("Connecting to clipboard {clipboard_port}...");
     let mut buf = [0_u8; 9];
 
-    let Ok(Ok((_, addr))) = timeout(Duration::from_secs(5), socket.recv_from(&mut buf)).await else {
+    let Ok(Ok((_, addr))) = timeout(Duration::from_secs(5), socket.recv_from(&mut buf)).await
+    else {
         eprintln!("Timeout trying to connect to clipboard {clipboard_port}");
         exit(1);
     };
@@ -267,7 +267,8 @@ async fn start_client_direct(
     };
 
     let addr = format!("{server_ip}:{server_port}");
-    let stream = TcpStream::connect(&addr).await
+    let stream = TcpStream::connect(&addr)
+        .await
         .map_err(|e| format!("Failed to connect to {addr}: {e}"))?;
     let ip = stream.peer_addr()?.ip();
     let stream = tls_connector
@@ -324,18 +325,16 @@ async fn recv_clipboard(
 fn load_or_create_config() -> Config {
     match Config::load() {
         Ok(config) => config,
-        Err(config::ConfigError::FileNotFound(_)) => {
-            match Config::create_default() {
-                Ok(config) => {
-                    eprintln!("Created default config at ~/.clipshare.toml");
-                    config
-                }
-                Err(e) => {
-                    eprintln!("Failed to create default config: {e}");
-                    exit(1);
-                }
+        Err(config::ConfigError::FileNotFound(_)) => match Config::create_default() {
+            Ok(config) => {
+                eprintln!("Created default config at ~/.clipshare.toml");
+                config
             }
-        }
+            Err(e) => {
+                eprintln!("Failed to create default config: {e}");
+                exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("Failed to load config: {e}");
             exit(1);

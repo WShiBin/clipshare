@@ -204,11 +204,11 @@ impl ClipboardObject {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let buf = match self {
             Self::Text(ref text) => {
-                trace!(len = text.as_bytes().len(), "Sending text");
+                trace!(len = text.len(), "Sending text");
 
                 [
                     &[ClipboardObjectType::Text as u8][..],
-                    &u64::try_from(text.as_bytes().len())?.to_be_bytes()[..],
+                    &u64::try_from(text.len())?.to_be_bytes()[..],
                 ]
                 .concat()
             }
