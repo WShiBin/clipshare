@@ -24,10 +24,22 @@ const HANDSHAKE: &[u8; 9] = b"clipshare";
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Clipboard id to connect to
+    /// Clipboard id to connect to (UDP discovery mode, legacy)
     clipboard: Option<u16>,
 
-    /// Don´t clear the clipboard on start
+    /// Run as server (listen for connections)
+    #[arg(long)]
+    listen: bool,
+
+    /// Connect to a specific address (format: IP:PORT)
+    #[arg(long)]
+    connect: Option<String>,
+
+    /// Server port (only used with --listen)
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Don't clear the clipboard on start
     #[arg(long)]
     no_clear: bool,
 }
