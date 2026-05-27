@@ -9,7 +9,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{Instrument, debug, error_span, instrument, metadata::LevelFilter, trace};
@@ -95,11 +95,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                     );
                     exit(1);
                 });
-                start_client_direct(clipboard, &addr.ip().to_string(), addr.port()).await
+                start_client_loop(clipboard, &addr.ip().to_string(), addr.port()).await
             } else {
                 // Default: client mode — read config
                 let config = load_or_create_config();
-                start_client_direct(clipboard, &config.server_ip, config.server_port).await
+                start_client_loop(clipboard, &config.server_ip, config.server_port).await
             }
         }
     }
@@ -124,8 +124,23 @@ async fn start_server_fixed(
         TlsAcceptor::from(Arc::new(config))
     };
 
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-    eprintln!("Clipshare server listening on port {port}");
+    let max_port = port + 5;
+    let mut current_port = port;
+    let listener = loop {
+        match TcpListener::bind(("0.0.0.0", current_port)).await {
+            Ok(l) => {
+                eprintln!("Clipshare server listening on port {current_port}");
+                break l;
+            }
+            Err(_) if current_port < max_port => {
+                current_port += 1;
+                continue;
+            }
+            Err(e) => {
+                return Err(format!("Failed to bind to port {port}-{max_port}: {e}").into());
+            }
+        }
+    };
 
     while let Ok((stream, addr)) = listener.accept().await {
         let stream = match tls_acceptor.accept(stream).await {
@@ -211,13 +226,41 @@ async fn start_client(
 }
 
 #[instrument(skip(clipboard))]
+async fn start_client_loop(
+    clipboard: Arc<Clipboard>,
+    server_ip: &str,
+    base_port: u16,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let max_port = base_port + 5;
+    let ip = server_ip.to_string();
+
+    eprintln!("Connecting to {ip}:{base_port} (retry until Ctrl+C)...");
+
+    loop {
+        let mut ok = false;
+        for port in base_port..=max_port {
+            if start_client_direct(clipboard.clone(), &ip, port)
+                .await
+                .is_ok()
+            {
+                ok = true;
+                break;
+            }
+        }
+        if ok {
+            eprintln!("Connection closed, reconnecting...");
+        } else {
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+#[instrument(skip(clipboard))]
 async fn start_client_direct(
     clipboard: Arc<Clipboard>,
     server_ip: &str,
     server_port: u16,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("Connecting to clipboard at {server_ip}:{server_port}...");
-
     let tls_connector = {
         let config = rustls::ClientConfig::builder()
             .dangerous()
