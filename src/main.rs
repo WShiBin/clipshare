@@ -1,4 +1,4 @@
-use std::{error::Error, io, net::SocketAddr, process::exit, sync::Arc, time::Duration};
+use std::{error::Error, net::SocketAddr, process::exit, sync::Arc, time::Duration};
 
 use clap::Parser;
 use clipboard::ClipboardObject;
@@ -9,12 +9,12 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     select,
-    time::{sleep, timeout},
+    time::timeout,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, error_span, instrument, metadata::LevelFilter, trace, Instrument};
+use tracing::{Instrument, debug, error_span, instrument, metadata::LevelFilter, trace};
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::clipboard::Clipboard;
 use config::Config;
@@ -25,7 +25,18 @@ mod config;
 const HANDSHAKE: &[u8; 9] = b"clipshare";
 
 #[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "Share clipboard between machines on your local network.",
+    after_help = "EXAMPLES:\n  \
+        clipshare                    Client mode (default), connect via config\n  \
+        clipshare --listen           Server mode, wait for connections\n  \
+        clipshare --connect 192.168.0.200:12345  Client, connect to explicit address\n  \
+        clipshare 11337              Legacy UDP discovery mode\n\n\
+    Configuration file: ~/.clipshare.toml (auto-created)"
+)]
 struct Cli {
     /// Clipboard id to connect to (UDP discovery mode, legacy)
     clipboard: Option<u16>,
@@ -92,68 +103,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         }
     }
-}
-
-#[instrument(skip(clipboard))]
-async fn start_server(clipboard: Arc<Clipboard>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.set_broadcast(true)?;
-    let port = socket.local_addr()?.port();
-
-    let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([])?;
-    let public_key = cert.der().to_vec();
-    let private_key = signing_key.serialize_der();
-
-    tokio::spawn(
-        async move {
-            loop {
-                if socket.send_to(HANDSHAKE, ("255.255.255.255", port)).await? == 0 {
-                    debug!("Failed to send UDP packet");
-                    break;
-                }
-                sleep(Duration::from_secs(3)).await;
-            }
-            io::Result::Ok(())
-        }
-        .instrument(error_span!("Port publishing", port)),
-    );
-
-    let tls_acceptor = {
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(public_key)],
-                PrivateKeyDer::Pkcs8(private_key.into()),
-            )?;
-        TlsAcceptor::from(Arc::new(config))
-    };
-
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-    eprintln!("Run `clipshare {port}` on another machine of your network");
-
-    while let Ok((stream, addr)) = listener.accept().await {
-        let stream = tls_acceptor.accept(stream).await?;
-        trace!("New connection arrived");
-        let ip = addr.ip();
-        let clipboard = clipboard.clone();
-        tokio::spawn(
-            async move {
-                let (reader, writer) = tokio::io::split(stream);
-
-                if let Err(err) = select! {
-                    result = recv_clipboard(clipboard.clone(), reader) => result,
-                    result = send_clipboard(clipboard.clone(), writer) => result,
-                } {
-                    debug!(error = %err, "Server error");
-                }
-                trace!("Finishing server connection");
-                Ok::<_, Box<dyn Error + Send + Sync>>(())
-            }
-            .instrument(error_span!("Connection", %ip)),
-        );
-    }
-
-    Ok(())
 }
 
 #[instrument(skip(clipboard))]
